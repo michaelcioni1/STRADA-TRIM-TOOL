@@ -1,0 +1,18 @@
+STRADA Trim Tool — installing
+
+1. Drag "STRADA Trim Tool" onto the Applications folder in this window.
+2. Open STRADA Trim Tool from your Applications folder.
+
+If macOS says the app "can't be opened" or "Apple could not verify" it:
+This happens because the app was built privately rather than distributed
+through Apple. It only needs to be approved once:
+
+  1. Click "Done" (or "OK") on the warning.
+  2. Open System Settings > Privacy & Security.
+  3. Scroll down to the Security section. You'll see a note about STRADA Trim Tool.
+     Click "Open Anyway", then confirm with your password or Touch ID.
+
+After that, STRADA Trim Tool opens normally with a double-click.
+
+The first time STRADA Trim Tool reads an external drive, macOS may ask for
+permission to access removable volumes — click Allow.
