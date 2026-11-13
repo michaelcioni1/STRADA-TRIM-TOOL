@@ -1,0 +1,60 @@
+name: Build STRADA Trim Tool installer
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: macos-15
+    env:
+      # Optional — only used if you add these as repository secrets later
+      # (Apple Developer account, removes the "can't verify" warning).
+      MACOS_CERT_P12: ${{ secrets.MACOS_CERT_P12 }}
+      MACOS_CERT_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}
+      APPLE_ID: ${{ secrets.APPLE_ID }}
+      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+      APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+
+    steps:
+      - name: Get the files
+        uses: actions/checkout@v4
+
+      - name: Load Developer ID certificate (only if provided)
+        if: env.MACOS_CERT_P12 != ''
+        run: |
+          echo "$MACOS_CERT_P12" | base64 --decode > cert.p12
+          security create-keychain -p ci build.keychain
+          security default-keychain -s build.keychain
+          security unlock-keychain -p ci build.keychain
+          security set-keychain-settings -lut 3600 build.keychain
+          security import cert.p12 -k build.keychain -P "$MACOS_CERT_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple: -s -k ci build.keychain
+          ID=$(security find-identity -v -p codesigning build.keychain | grep "Developer ID Application" | head -1 | sed -E 's/.*"(.*)"/\1/')
+          echo "DEV_ID=$ID" >> "$GITHUB_ENV"
+          rm cert.p12
+
+      - name: Build the app and the .dmg installer
+        run: |
+          if [ -z "$MACOS_CERT_P12" ]; then unset APPLE_ID; fi
+          bash make_dmg.sh
+
+      - name: Save the installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: STRADA-Trim-Tool-installer
+          path: "*.dmg"
+
+      - name: Publish to the Releases page
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v3.0
+          name: STRADA Trim Tool 3.0
+          body: |
+            Download **STRADA_Trim_Tool_3.0.dmg** below, open it, and drag STRADA Trim Tool into Applications.
+            First launch: if macOS says it can't verify the app, go to System Settings → Privacy & Security → Open Anyway.
+          files: "*.dmg"
