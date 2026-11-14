@@ -1187,6 +1187,8 @@ final class AppModel: ObservableObject {
 
     func transfer() {
         guard let dest = destRoot, !isBusy else { return }
+        let layout = self.layout
+        let verify = self.verify
         let plan: [(Int, FoundFile, URL, String)] = files.indices.compactMap { i in
             let f = files[i]
             guard f.selected else { return nil }
@@ -1224,8 +1226,6 @@ final class AppModel: ObservableObject {
         confirm.addButton(withTitle: "Cancel")
         guard confirm.runModal() == .alertFirstButtonReturn else { return }
 
-        let layout = self.layout
-        let verify = self.verify
         let timelineNames = timelineURLs.map { $0.lastPathComponent }
         let unmatched = self.unmatched
         let sourcePaths = sourceRoots.map { $0.path }
