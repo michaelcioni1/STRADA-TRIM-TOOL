@@ -63,6 +63,16 @@ struct Candidate {
     let size: Int64
 }
 
+struct TimelineFile: Hashable {
+    let url: URL
+    let video: Int
+    let audio: Int
+}
+
+enum InspectorTab {
+    case transfer, file
+}
+
 struct CategoryTotal {
     let name: String
     let count: Int
@@ -796,6 +806,7 @@ struct SpaceAudit {
     var byCategory: [CategoryTotal] = []
     var hasDest = false
     var free: Int64? = nil
+    var capacity: Int64? = nil
     var alreadyCount = 0
     var already: Int64 = 0
 
@@ -831,7 +842,10 @@ struct SpaceAudit {
 @MainActor
 final class AppModel: ObservableObject {
     @Published var timelineURLs: [URL] = []
-    @Published var timelineInfo: [String] = []
+    @Published var timelines: [TimelineFile] = []
+    @Published var searchText = ""
+    @Published var selectedIndex: Int? = nil
+    @Published var inspectorTab: InspectorTab = .transfer
     @Published var refs: [TimelineRef] = []
     @Published var sourceRoots: [URL] = []
     @Published var destRoot: URL?
@@ -938,6 +952,9 @@ final class AppModel: ObservableObject {
         if let d = destRoot {
             a.hasDest = true
             a.free = freeSpace(d)
+            if let c = (try? d.resourceValues(forKeys: [.volumeTotalCapacityKey]))?.volumeTotalCapacity {
+                a.capacity = Int64(c)
+            }
             destFree = a.free
         }
         var cats: [String: (Int, Int64)] = [:]
@@ -978,7 +995,7 @@ final class AppModel: ObservableObject {
                 refs += r
                 let v = r.filter { $0.isVideo }.count
                 let a = r.filter { $0.isAudio }.count
-                timelineInfo.append("\(u.lastPathComponent) — \(v) video, \(a) audio")
+                timelines.append(TimelineFile(url: u, video: v, audio: a))
             } catch {
                 problems.append("\(u.lastPathComponent): \(error.localizedDescription)")
             }
@@ -992,7 +1009,7 @@ final class AppModel: ObservableObject {
 
     func clearTimelines() {
         timelineURLs = []
-        timelineInfo = []
+        timelines = []
         refs = []
         resetResults()
         status = "Add a timeline export (EDL, XML, FCPXML or OTIO) to begin — or drop it on this window."
@@ -1007,13 +1024,44 @@ final class AppModel: ObservableObject {
         unmatched = []
         hasScanned = false
         detail = ""
+        selectedIndex = nil
         audit = SpaceAudit()
+    }
+
+    // MARK: Browsing helpers
+
+    var isSearching: Bool { !searchText.trimmingCharacters(in: .whitespaces).isEmpty }
+
+    func isOpen(_ cat: String) -> Bool { isSearching || expanded.contains(cat) }
+
+    func visibleMembers(_ cat: String) -> [Int] {
+        let members = groupMembers[cat] ?? []
+        let q = searchText.trimmingCharacters(in: .whitespaces).lowercased()
+        if q.isEmpty { return members }
+        return members.filter {
+            files.indices.contains($0)
+                && (files[$0].url.lastPathComponent.lowercased().contains(q) || files[$0].matchedName.contains(q))
+        }
+    }
+
+    func selectFile(_ i: Int) {
+        selectedIndex = i
+        inspectorTab = .file
+    }
+
+    func revealSelected() {
+        guard let i = selectedIndex, files.indices.contains(i) else { return }
+        NSWorkspace.shared.activateFileViewerSelecting([files[i].url])
     }
 
     // MARK: Sources / destination
 
     func addSource(_ u: URL) {
         if !sourceRoots.contains(u) { sourceRoots.append(u) }
+        resetResults()
+    }
+    func removeSource(_ u: URL) {
+        sourceRoots.removeAll { $0 == u }
         resetResults()
     }
     func clearSources() {
@@ -1392,117 +1440,185 @@ enum Panels {
     }
 }
 
-// MARK: - Views
+// MARK: - Strada theme
+
+extension Color {
+    init(hex: UInt32) {
+        self.init(red: Double((hex >> 16) & 0xff) / 255,
+                  green: Double((hex >> 8) & 0xff) / 255,
+                  blue: Double(hex & 0xff) / 255)
+    }
+}
+
+enum Theme {
+    static let bg = Color(hex: 0x0D0F13)
+    static let rail = Color(hex: 0x090A0D)
+    static let panel = Color(hex: 0x13151A)
+    static let card = Color(hex: 0x1A1D23)
+    static let card2 = Color(hex: 0x20242B)
+    static let rowAlt = Color(hex: 0x171A1F)
+    static let border = Color(hex: 0x2A2E36)
+    static let bar = Color(hex: 0x2A2E36)
+    static let text = Color(hex: 0xE9EBEE)
+    static let text2 = Color(hex: 0x9198A3)
+    static let text3 = Color(hex: 0x5F6670)
+    static let accent = Color(hex: 0x3D8BFF)
+    static let selected = Color(hex: 0x24406C)
+    static let green = Color(hex: 0x4DBA6B)
+    static let yellow = Color(hex: 0xF2C230)
+    static let red = Color(hex: 0xEF5B5B)
+}
+
+struct PanelBackground: ViewModifier {
+    func body(content: Content) -> some View {
+        content
+            .background(RoundedRectangle(cornerRadius: 12).fill(Theme.panel))
+            .clipShape(RoundedRectangle(cornerRadius: 12))
+            .overlay(RoundedRectangle(cornerRadius: 12).stroke(Theme.border, lineWidth: 1))
+    }
+}
+
+extension View {
+    func stradaPanel() -> some View { modifier(PanelBackground()) }
+}
+
+struct StradaButtonBody: View {
+    let configuration: ButtonStyleConfiguration
+    let primary: Bool
+    let fullWidth: Bool
+    @Environment(\.isEnabled) private var isEnabled
+
+    var body: some View {
+        configuration.label
+            .font(.system(size: 13, weight: .semibold))
+            .lineLimit(1)
+            .padding(.horizontal, 14)
+            .padding(.vertical, primary && fullWidth ? 10 : 7)
+            .frame(maxWidth: fullWidth ? .infinity : nil)
+            .foregroundStyle(primary ? Color.white : Theme.text)
+            .background(RoundedRectangle(cornerRadius: 8).fill(primary ? Theme.accent : Theme.card2))
+            .overlay(RoundedRectangle(cornerRadius: 8).stroke(primary ? Color.clear : Theme.border, lineWidth: 1))
+            .opacity(isEnabled ? (configuration.isPressed ? 0.75 : 1) : 0.4)
+            .contentShape(Rectangle())
+    }
+}
+
+struct StradaButtonStyle: ButtonStyle {
+    var primary = false
+    var fullWidth = false
+    func makeBody(configuration: Configuration) -> some View {
+        StradaButtonBody(configuration: configuration, primary: primary, fullWidth: fullWidth)
+    }
+}
+
+struct IconButton: View {
+    let system: String
+    let help: String
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: system)
+                .font(.system(size: 13, weight: .medium))
+                .foregroundStyle(Theme.text2)
+                .frame(width: 32, height: 30)
+                .background(RoundedRectangle(cornerRadius: 8).fill(Theme.card2))
+                .overlay(RoundedRectangle(cornerRadius: 8).stroke(Theme.border, lineWidth: 1))
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help(help)
+    }
+}
+
+struct Card<Content: View>: View {
+    var padding: CGFloat = 14
+    @ViewBuilder let content: () -> Content
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) { content() }
+            .padding(padding)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(RoundedRectangle(cornerRadius: 12).fill(Theme.card))
+            .overlay(RoundedRectangle(cornerRadius: 12).stroke(Theme.border, lineWidth: 1))
+    }
+}
+
+struct SectionHeader: View {
+    let title: String
+    var clearAction: (() -> Void)? = nil
+    var addAction: (() -> Void)? = nil
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Text(title)
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(Theme.text2)
+            Spacer()
+            if let clear = clearAction {
+                Button("Clear", action: clear)
+                    .buttonStyle(.plain)
+                    .font(.system(size: 11))
+                    .foregroundStyle(Theme.text3)
+            }
+            if let add = addAction {
+                Button(action: add) {
+                    Image(systemName: "plus")
+                        .font(.system(size: 11, weight: .bold))
+                        .foregroundStyle(Theme.text2)
+                        .frame(width: 22, height: 22)
+                        .background(RoundedRectangle(cornerRadius: 6).fill(Theme.card2))
+                }
+                .buttonStyle(.plain)
+            }
+        }
+    }
+}
+
+struct StatusDot: View {
+    var color: Color = Theme.green
+    var body: some View {
+        Circle().fill(color).frame(width: 7, height: 7)
+    }
+}
+
+func iconName(for family: Family) -> String {
+    switch family {
+    case .camera: return "camera.aperture"
+    case .video: return "film"
+    case .audio: return "waveform"
+    case .sidecar: return "doc.text"
+    case .avid: return "film.stack"
+    }
+}
+
+func statusColor(_ s: String) -> Color {
+    if s.hasPrefix("✓") { return Theme.green }
+    if s.hasPrefix("✗") { return Theme.red }
+    if s.hasPrefix("Copying") || s.hasPrefix("Verifying") { return Theme.accent }
+    return Theme.text2
+}
+
+// MARK: - Root
 
 struct ContentView: View {
     @EnvironmentObject var model: AppModel
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            GroupBox(label: Label("1. Timeline", systemImage: "film.stack")) {
-                VStack(alignment: .leading, spacing: 6) {
-                    HStack {
-                        Button("Add Timeline…") { model.addTimelines(Panels.pickTimelines()) }
-                        Button("Clear") { model.clearTimelines() }.disabled(model.timelineURLs.isEmpty)
-                        Text("EDL · FCP7 XML · FCPX (.fcpxml / .fcpxmld) · OTIO")
-                            .font(.caption).foregroundStyle(.secondary)
-                        Spacer()
-                        Toggle("Video (\(model.videoRefCount))", isOn: $model.includeVideo)
-                        Toggle("Audio — production sound & SFX (\(model.audioRefCount))", isOn: $model.includeAudio)
-                    }
-                    if model.timelineInfo.isEmpty {
-                        Text("No timeline loaded — or drop files on this window").foregroundStyle(.secondary)
-                    } else {
-                        ForEach(model.timelineInfo, id: \.self) { t in
-                            Text(t).font(.callout).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
-                        }
-                    }
-                }
-                .padding(6)
-                .disabled(model.isBusy)
+        HStack(spacing: 0) {
+            RailView()
+            HStack(spacing: 12) {
+                SidebarView().frame(width: 270)
+                MainListView()
+                InspectorView().frame(width: 330)
             }
-
-            GroupBox(label: Label("2. Source drive(s)", systemImage: "externaldrive")) {
-                HStack(alignment: .top) {
-                    Button("Add Source…") {
-                        if let u = Panels.pickFolder("Add Source", message: "Choose a drive or folder that holds media") {
-                            model.addSource(u)
-                        }
-                    }
-                    Button("Clear") { model.clearSources() }.disabled(model.sourceRoots.isEmpty)
-                    VStack(alignment: .leading, spacing: 2) {
-                        if model.sourceRoots.isEmpty {
-                            Text("No source selected").foregroundStyle(.secondary)
-                        }
-                        ForEach(model.sourceRoots, id: \.self) { u in
-                            Text(u.path).lineLimit(1).truncationMode(.middle).foregroundStyle(.secondary)
-                        }
-                    }
-                    Spacer()
-                    Toggle("Allow partial name matches", isOn: $model.allowPartial)
-                        .help("Lets an 8-character CMX reel name like A001C003 match A001C003_220101_R1AB.mxf")
-                    Button("Find Media") { model.scan() }
-                        .buttonStyle(.borderedProminent)
-                        .disabled(model.sourceRoots.isEmpty || model.activeRefs.isEmpty)
-                }
-                .padding(6)
-                .disabled(model.isBusy)
-            }
-
-            ResultsView()
-
-            AuditPanel(audit: model.audit, hasScanned: model.hasScanned)
-
-            GroupBox(label: Label("3. Destination drive", systemImage: "externaldrive.badge.plus")) {
-                VStack(alignment: .leading, spacing: 8) {
-                    HStack {
-                        Button("Choose…") {
-                            if let u = Panels.pickFolder("Use as Destination", message: "Choose where the pulled media should go") {
-                                model.setDestination(u)
-                            }
-                        }
-                        .disabled(model.isBusy)
-                        Text(model.destRoot?.path ?? "Not selected")
-                            .lineLimit(1).truncationMode(.middle).foregroundStyle(.secondary)
-                        Spacer()
-                        if let free = model.destFree {
-                            Text("Free: \(formatTB(free))")
-                                .foregroundStyle(model.audit.fits == false ? Color.red : Color.secondary)
-                        }
-                    }
-                    HStack {
-                        Picker("Organize:", selection: $model.layout) {
-                            ForEach(Layout.allCases) { l in Text(l.rawValue).tag(l) }
-                        }
-                        .frame(maxWidth: 400)
-                        .disabled(model.isBusy)
-                        Toggle("Verify with MD5 checksum", isOn: $model.verify)
-                            .disabled(model.isBusy)
-                        Spacer()
-                        if model.isBusy {
-                            Button("Cancel", role: .cancel) { model.cancel() }
-                        }
-                        Button("Transfer \(model.selectedCount) File\(model.selectedCount == 1 ? "" : "s")") {
-                            model.transfer()
-                        }
-                        .buttonStyle(.borderedProminent)
-                        .disabled(model.isBusy || model.destRoot == nil || model.selectedCount == 0)
-                    }
-                }
-                .padding(6)
-            }
-
-            VStack(alignment: .leading, spacing: 4) {
-                if model.isBusy || model.progress != nil {
-                    ProgressView(value: model.progress)
-                }
-                Text(model.status)
-                Text(model.detail).font(.caption).foregroundStyle(.secondary)
-                    .lineLimit(1).truncationMode(.middle)
-            }
+            .padding(12)
         }
-        .padding()
-        .frame(minWidth: 1180, minHeight: 900)
+        .background(Theme.bg)
+        .foregroundStyle(Theme.text)
+        .tint(Theme.accent)
+        .preferredColorScheme(.dark)
+        .frame(minWidth: 1360, minHeight: 820)
         .dropDestination(for: URL.self) { urls, _ in
             guard !model.isBusy else { return false }
             model.addTimelines(urls)
@@ -1517,64 +1633,336 @@ struct ContentView: View {
     }
 }
 
-struct ResultsView: View {
+// MARK: - Icon rail
+
+struct RailIcon: View {
+    let system: String
+    var active = false
+    var badge = 0
+    let help: String
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: system)
+                .font(.system(size: 16, weight: .medium))
+                .foregroundStyle(active ? Theme.text : Theme.text3)
+                .frame(width: 38, height: 38)
+                .background(RoundedRectangle(cornerRadius: 10).fill(active ? Theme.card2 : Color.clear))
+                .overlay(alignment: .topTrailing) {
+                    if badge > 0 {
+                        Text("\(badge)")
+                            .font(.system(size: 9, weight: .bold))
+                            .foregroundStyle(Color.white)
+                            .padding(.horizontal, 4)
+                            .padding(.vertical, 1)
+                            .background(Capsule().fill(Theme.accent))
+                            .offset(x: 3, y: -2)
+                    }
+                }
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help(help)
+    }
+}
+
+struct RailView: View {
     @EnvironmentObject var model: AppModel
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            HStack {
-                Text("Found media by file type").font(.headline)
-                if model.hasScanned {
-                    Text("\(model.files.count) files in \(model.groupOrder.count) types · \(model.selectedCount) selected")
-                        .foregroundStyle(.secondary)
-                }
+        VStack(spacing: 14) {
+            Image(nsImage: NSApp.applicationIconImage)
+                .resizable()
+                .interpolation(.high)
+                .frame(width: 34, height: 34)
+                .padding(.top, 10)
+                .padding(.bottom, 6)
+            RailIcon(system: "folder.fill", active: true, help: "Pull list") {}
+            RailIcon(system: "exclamationmark.triangle", badge: model.unmatched.count,
+                     help: "Timeline references not found") {
+                if !model.unmatched.isEmpty { model.showUnmatched = true }
+            }
+            RailIcon(system: "square.and.arrow.up", help: "Export pull list (CSV)") {
+                model.exportCSV()
+            }
+            Spacer()
+            RailIcon(system: "questionmark.circle", help: "Supported formats") {
+                showAlert("STRADA Trim Tool",
+                          "Timelines: CMX EDL, Final Cut Pro 7 XML (also from Premiere Pro and DaVinci Resolve), Final Cut Pro X .fcpxml / .fcpxmld, OpenTimelineIO .otio.\n\nMedia: ARRI, Sony, Canon and Panasonic MXF, RED R3D, Blackmagic BRAW, Canon CRM, Nikon NEV, Phantom CINE, QuickTime MOV (incl. ProRes RAW), MP4, ARRIRAW / DNG / EXR / DPX frame sequences, and WAV / AIFF / MP3 / M4A / FLAC audio.")
+            }
+            .padding(.bottom, 12)
+        }
+        .frame(width: 58)
+        .frame(maxHeight: .infinity)
+        .background(Theme.rail)
+    }
+}
+
+// MARK: - Sidebar
+
+struct SidebarView: View {
+    @EnvironmentObject var model: AppModel
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(spacing: 8) {
+                Text("STRADA")
+                    .font(.system(size: 12, weight: .heavy))
+                    .tracking(2)
+                    .foregroundStyle(Theme.text)
+                Text("Trim Tool")
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(Theme.text2)
                 Spacer()
-                if !model.unmatched.isEmpty {
-                    Button("Not Found (\(model.unmatched.count))…") { model.showUnmatched = true }
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 14)
+
+            Divider().overlay(Theme.border)
+
+            ScrollView {
+                VStack(alignment: .leading, spacing: 20) {
+                    timelinesSection
+                    sourcesSection
                 }
-                Button("Expand All") { model.expandAll() }.disabled(model.groupOrder.isEmpty)
-                Button("Collapse All") { model.collapseAll() }.disabled(model.groupOrder.isEmpty)
-                Button("Select All") { model.selectAll() }.disabled(model.files.isEmpty || model.isBusy)
-                Button("Select None") { model.selectNone() }.disabled(model.files.isEmpty || model.isBusy)
-                Button("Export Pull List…") { model.exportCSV() }.disabled(model.files.isEmpty || model.isBusy)
+                .padding(14)
             }
 
-            VStack(spacing: 0) {
-                HStack(spacing: 8) {
-                    Text("File").frame(maxWidth: .infinity, alignment: .leading)
-                    Text("Timeline name").frame(width: 190, alignment: .leading)
-                    Text("Size").frame(width: 80, alignment: .trailing)
-                    Text("Copy to").frame(width: 300, alignment: .leading)
-                    Text("Status").frame(width: 190, alignment: .leading)
+            Divider().overlay(Theme.border)
+
+            Button {
+                model.scan()
+            } label: {
+                Label(model.isBusy ? "Working…" : "Find Media", systemImage: "magnifyingglass")
+            }
+            .buttonStyle(StradaButtonStyle(primary: true, fullWidth: true))
+            .disabled(model.isBusy || model.sourceRoots.isEmpty || model.activeRefs.isEmpty)
+            .padding(14)
+        }
+        .stradaPanel()
+        .disabled(model.isBusy)
+    }
+
+    var timelinesSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            SectionHeader(title: "Timelines",
+                          clearAction: model.timelines.isEmpty ? nil : { model.clearTimelines() },
+                          addAction: { model.addTimelines(Panels.pickTimelines()) })
+            if model.timelines.isEmpty {
+                VStack(spacing: 6) {
+                    Image(systemName: "arrow.down.doc")
+                        .font(.system(size: 20))
+                        .foregroundStyle(Theme.text3)
+                    Text("Drop EDL, XML, FCPXML or OTIO")
+                        .font(.system(size: 12))
+                        .foregroundStyle(Theme.text2)
+                    Text("or click +")
+                        .font(.system(size: 11))
+                        .foregroundStyle(Theme.text3)
                 }
-                .font(.caption).foregroundStyle(.secondary)
-                .padding(.leading, 50).padding(.trailing, 16).padding(.vertical, 4)
-                Divider()
-                ScrollView {
-                    if model.groupOrder.isEmpty {
-                        Text(model.hasScanned ? "No matching media found." : "Run “Find Media” to list matching files by type.")
-                            .foregroundStyle(.secondary)
-                            .frame(maxWidth: .infinity, alignment: .center)
-                            .padding(30)
-                    } else {
-                        LazyVStack(alignment: .leading, spacing: 4) {
-                            ForEach(model.groupOrder, id: \.self) { cat in
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 18)
+                .background(
+                    RoundedRectangle(cornerRadius: 10)
+                        .stroke(Theme.border, style: StrokeStyle(lineWidth: 1, dash: [5, 4]))
+                )
+            } else {
+                ForEach(model.timelines, id: \.self) { t in
+                    HStack(spacing: 10) {
+                        Image(systemName: "film")
+                            .foregroundStyle(Theme.text2)
+                            .frame(width: 18)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(t.url.lastPathComponent)
+                                .font(.system(size: 13))
+                                .lineLimit(1).truncationMode(.middle)
+                            Text("\(t.video) video · \(t.audio) audio")
+                                .font(.system(size: 11))
+                                .foregroundStyle(Theme.text3)
+                        }
+                        Spacer(minLength: 4)
+                        StatusDot()
+                    }
+                    .padding(.vertical, 4)
+                    .help(t.url.path)
+                }
+                VStack(alignment: .leading, spacing: 6) {
+                    Toggle(isOn: $model.includeVideo) {
+                        Text("Video events").font(.system(size: 12)).foregroundStyle(Theme.text2)
+                    }
+                    Toggle(isOn: $model.includeAudio) {
+                        Text("Audio events (sound & SFX)").font(.system(size: 12)).foregroundStyle(Theme.text2)
+                    }
+                }
+                .toggleStyle(.switch)
+                .controlSize(.mini)
+                .padding(.top, 4)
+            }
+        }
+    }
+
+    var sourcesSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            SectionHeader(title: "Source Drives",
+                          clearAction: model.sourceRoots.isEmpty ? nil : { model.clearSources() },
+                          addAction: {
+                              if let u = Panels.pickFolder("Add Source", message: "Choose a drive or folder that holds media") {
+                                  model.addSource(u)
+                              }
+                          })
+            if model.sourceRoots.isEmpty {
+                Text("No source selected")
+                    .font(.system(size: 12))
+                    .foregroundStyle(Theme.text3)
+                    .padding(.vertical, 4)
+            }
+            ForEach(model.sourceRoots, id: \.self) { u in
+                HStack(spacing: 10) {
+                    Image(systemName: "externaldrive.fill")
+                        .foregroundStyle(Theme.text2)
+                        .frame(width: 18)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(u.lastPathComponent.isEmpty ? u.path : u.lastPathComponent)
+                            .font(.system(size: 13))
+                            .lineLimit(1)
+                        Text(u.path)
+                            .font(.system(size: 11))
+                            .foregroundStyle(Theme.text3)
+                            .lineLimit(1).truncationMode(.middle)
+                    }
+                    Spacer(minLength: 4)
+                    Button {
+                        model.removeSource(u)
+                    } label: {
+                        Image(systemName: "xmark")
+                            .font(.system(size: 9, weight: .bold))
+                            .foregroundStyle(Theme.text3)
+                    }
+                    .buttonStyle(.plain)
+                    .help("Remove this source")
+                    StatusDot()
+                }
+                .padding(.vertical, 4)
+                .help(u.path)
+            }
+            Toggle(isOn: $model.allowPartial) {
+                Text("Allow partial name matches").font(.system(size: 12)).foregroundStyle(Theme.text2)
+            }
+            .toggleStyle(.switch)
+            .controlSize(.mini)
+            .help("Lets an 8-character CMX reel name like A001C003 match A001C003_220101_R1AB.mxf")
+            .padding(.top, 4)
+        }
+    }
+}
+
+// MARK: - Main list
+
+struct MainListView: View {
+    @EnvironmentObject var model: AppModel
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 10) {
+                Text("Pull List")
+                    .font(.system(size: 20, weight: .bold))
+                if model.hasScanned {
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(Theme.text3)
+                    Text("\(model.groupOrder.count) file types · \(model.files.count) files · \(model.selectedCount) selected")
+                        .font(.system(size: 14, weight: .medium))
+                        .foregroundStyle(Theme.text2)
+                        .lineLimit(1)
+                }
+                Spacer(minLength: 8)
+                HStack(spacing: 6) {
+                    Image(systemName: "magnifyingglass")
+                        .font(.system(size: 12))
+                        .foregroundStyle(Theme.text3)
+                    TextField("Search", text: $model.searchText)
+                        .textFieldStyle(.plain)
+                        .font(.system(size: 13))
+                        .frame(width: 140)
+                }
+                .padding(.horizontal, 10)
+                .frame(height: 30)
+                .background(RoundedRectangle(cornerRadius: 8).fill(Theme.card2))
+                .overlay(RoundedRectangle(cornerRadius: 8).stroke(Theme.border, lineWidth: 1))
+                IconButton(system: "rectangle.expand.vertical", help: "Open all file types") { model.expandAll() }
+                IconButton(system: "rectangle.compress.vertical", help: "Close all file types") { model.collapseAll() }
+                IconButton(system: "checkmark.square", help: "Select all") { model.selectAll() }
+                IconButton(system: "square", help: "Select none") { model.selectNone() }
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 12)
+
+            HStack(spacing: 10) {
+                Text("Name").frame(maxWidth: .infinity, alignment: .leading)
+                Text("Timeline name").frame(width: 160, alignment: .leading)
+                Text("Size").frame(width: 80, alignment: .trailing)
+                Text("Status").frame(width: 150, alignment: .leading)
+            }
+            .font(.system(size: 12, weight: .medium))
+            .foregroundStyle(Theme.text2)
+            .padding(.leading, 66)
+            .padding(.trailing, 20)
+            .padding(.vertical, 6)
+
+            Divider().overlay(Theme.border)
+
+            ScrollView {
+                if model.groupOrder.isEmpty {
+                    VStack(spacing: 10) {
+                        Image(systemName: model.hasScanned ? "tray" : "film.stack")
+                            .font(.system(size: 34))
+                            .foregroundStyle(Theme.text3)
+                        Text(model.hasScanned ? "No matching media found" : "Add a timeline and a source drive, then click Find Media")
+                            .font(.system(size: 13))
+                            .foregroundStyle(Theme.text2)
+                    }
+                    .frame(maxWidth: .infinity)
+                    .padding(.top, 90)
+                } else {
+                    LazyVStack(alignment: .leading, spacing: 3) {
+                        ForEach(model.groupOrder, id: \.self) { cat in
+                            let visible = model.visibleMembers(cat)
+                            if !(model.isSearching && visible.isEmpty) {
                                 GroupHeaderView(category: cat)
-                                if model.expanded.contains(cat) {
-                                    ForEach(model.groupMembers[cat] ?? [], id: \.self) { i in
-                                        FileRowView(index: i)
+                                if model.isOpen(cat) {
+                                    ForEach(Array(visible.enumerated()), id: \.element) { item in
+                                        FileRowView(index: item.element, alternate: item.offset % 2 == 1)
                                     }
                                 }
                             }
                         }
-                        .padding(6)
                     }
+                    .padding(8)
                 }
             }
-            .frame(minHeight: 260)
-            .background(RoundedRectangle(cornerRadius: 8).fill(Color(nsColor: .textBackgroundColor)))
-            .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.secondary.opacity(0.3)))
+
+            Divider().overlay(Theme.border)
+
+            HStack(spacing: 10) {
+                if model.isBusy {
+                    ProgressView().controlSize(.small)
+                }
+                Text(model.status)
+                    .font(.system(size: 12))
+                    .foregroundStyle(Theme.text2)
+                    .lineLimit(1)
+                Spacer(minLength: 8)
+                Text(model.detail)
+                    .font(.system(size: 11))
+                    .foregroundStyle(Theme.text3)
+                    .lineLimit(1).truncationMode(.middle)
+            }
+            .padding(.horizontal, 16)
+            .frame(height: 34)
+            .background(Theme.rail.opacity(0.5))
         }
+        .stradaPanel()
     }
 }
 
@@ -1584,19 +1972,20 @@ struct GroupHeaderView: View {
 
     var body: some View {
         let st = model.groupStats(category)
-        let isOpen = model.expanded.contains(category)
-        HStack(spacing: 8) {
+        let isOpen = model.isOpen(category)
+        HStack(spacing: 10) {
             Button { model.toggleExpanded(category) } label: {
                 Image(systemName: isOpen ? "chevron.down" : "chevron.right")
+                    .font(.system(size: 11, weight: .bold))
+                    .foregroundStyle(Theme.text2)
                     .frame(width: 16, height: 16)
             }
             .buttonStyle(.plain)
-            .help(isOpen ? "Close" : "Open")
 
             Button { model.toggleGroup(category) } label: {
                 Image(systemName: st.icon)
-                    .font(.title3)
-                    .foregroundStyle(st.selected > 0 ? Color.accentColor : Color.secondary)
+                    .font(.system(size: 15))
+                    .foregroundStyle(st.selected > 0 ? Theme.accent : Theme.text3)
             }
             .buttonStyle(.plain)
             .disabled(model.isBusy)
@@ -1604,153 +1993,454 @@ struct GroupHeaderView: View {
 
             Button { model.toggleExpanded(category) } label: {
                 HStack(spacing: 10) {
-                    Text(category).bold()
-                    Text("\(st.count) file\(st.count == 1 ? "" : "s")").foregroundStyle(.secondary)
+                    Image(systemName: "folder.fill")
+                        .foregroundStyle(Theme.accent.opacity(0.9))
+                    Text(category)
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundStyle(Theme.text)
+                    Text("\(st.count)")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(Theme.text2)
+                        .padding(.horizontal, 7)
+                        .padding(.vertical, 2)
+                        .background(Capsule().fill(Theme.card2))
                     Spacer()
                 }
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
 
-            Text("\(st.selected) selected · \(formatBytes(st.selectedBytes)) of \(formatBytes(st.bytes))")
+            Text("\(st.selected) of \(st.count) · \(formatBytes(st.selectedBytes))")
+                .font(.system(size: 12))
                 .monospacedDigit()
-                .foregroundStyle(.secondary)
+                .foregroundStyle(Theme.text2)
         }
-        .padding(.horizontal, 8)
-        .padding(.vertical, 6)
-        .background(RoundedRectangle(cornerRadius: 6).fill(Color.secondary.opacity(0.12)))
+        .padding(.horizontal, 10)
+        .frame(height: 36)
+        .background(RoundedRectangle(cornerRadius: 8).fill(Theme.card))
+        .padding(.top, 3)
     }
 }
 
 struct FileRowView: View {
     @EnvironmentObject var model: AppModel
     let index: Int
+    let alternate: Bool
 
     var body: some View {
         if model.files.indices.contains(index) {
             let f = model.files[index]
             let onDest = model.alreadyPresent.contains(index)
-            let dest = destinationRelPath(f, layout: model.layout)
-            HStack(spacing: 8) {
+            let status = f.state.isEmpty && onDest ? "On destination" : f.state
+            let isSelectedRow = model.selectedIndex == index
+            HStack(spacing: 10) {
                 Button { model.toggleFile(index) } label: {
                     Image(systemName: f.selected ? "checkmark.square.fill" : "square")
-                        .foregroundStyle(f.selected ? Color.accentColor : Color.secondary)
+                        .font(.system(size: 14))
+                        .foregroundStyle(f.selected ? Theme.accent : Theme.text3)
                 }
                 .buttonStyle(.plain)
                 .disabled(model.isBusy)
 
+                Image(systemName: iconName(for: f.type.family))
+                    .font(.system(size: 12))
+                    .foregroundStyle(Theme.text2)
+                    .frame(width: 16)
+
                 Text(f.url.lastPathComponent)
                     .lineLimit(1).truncationMode(.middle)
                     .frame(maxWidth: .infinity, alignment: .leading)
-                    .help("\(f.url.path)\n\(f.type.reason)")
                 Text(f.partialMatch ? "≈ \(f.matchedName)" : f.matchedName)
                     .lineLimit(1).truncationMode(.middle)
-                    .frame(width: 190, alignment: .leading)
-                    .foregroundStyle(.secondary)
-                    .help(f.partialMatch ? "Partial (truncated reel name) match" : "Exact match")
+                    .foregroundStyle(Theme.text2)
+                    .frame(width: 160, alignment: .leading)
                 Text(formatBytes(f.size))
                     .monospacedDigit()
+                    .foregroundStyle(Theme.text2)
                     .frame(width: 80, alignment: .trailing)
-                Text(dest)
-                    .lineLimit(1).truncationMode(.head)
-                    .frame(width: 300, alignment: .leading)
-                    .foregroundStyle(.secondary)
-                    .help(dest)
-                Text(f.state.isEmpty && onDest ? "On destination" : f.state)
-                    .lineLimit(1).truncationMode(.tail)
-                    .frame(width: 190, alignment: .leading)
+                Text(status)
+                    .lineLimit(1)
+                    .foregroundStyle(statusColor(status))
+                    .frame(width: 150, alignment: .leading)
             }
-            .padding(.leading, 34)
-            .padding(.trailing, 8)
-            .padding(.vertical, 2)
+            .font(.system(size: 13))
+            .padding(.leading, 36)
+            .padding(.trailing, 12)
+            .frame(height: 30)
+            .background(
+                RoundedRectangle(cornerRadius: 6)
+                    .fill(isSelectedRow ? Theme.selected : (alternate ? Theme.rowAlt : Color.clear))
+            )
+            .contentShape(Rectangle())
+            .onTapGesture { model.selectFile(index) }
         }
     }
 }
 
-struct AuditItem: View {
-    let title: String
-    let value: String
-    let note: String
-    var color: Color = .primary
+// MARK: - Inspector
+
+struct InspectorView: View {
+    @EnvironmentObject var model: AppModel
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 2) {
-            Text(title).font(.caption).foregroundStyle(.secondary)
-            Text(value).font(.title2).bold().foregroundStyle(color)
-            Text(note).font(.caption).foregroundStyle(.secondary)
+        VStack(spacing: 12) {
+            HStack(spacing: 4) {
+                tabButton("Transfer", .transfer)
+                tabButton("File Info", .file)
+            }
+            .padding(4)
+            .background(RoundedRectangle(cornerRadius: 10).fill(Theme.card))
+
+            ScrollView {
+                VStack(spacing: 12) {
+                    if model.inspectorTab == .transfer {
+                        AuditCard(audit: model.audit, hasScanned: model.hasScanned)
+                        DestinationCard()
+                        SettingsCard()
+                    } else {
+                        FileInfoCard()
+                    }
+                }
+            }
+
+            VStack(spacing: 8) {
+                if model.isBusy {
+                    ProgressView(value: model.progress)
+                        .tint(Theme.accent)
+                }
+                HStack(spacing: 8) {
+                    if model.isBusy {
+                        Button("Cancel") { model.cancel() }
+                            .buttonStyle(StradaButtonStyle())
+                    }
+                    Button {
+                        model.transfer()
+                    } label: {
+                        Text("Transfer \(model.selectedCount) File\(model.selectedCount == 1 ? "" : "s")  ·  \(formatTB(model.audit.toCopy))")
+                    }
+                    .buttonStyle(StradaButtonStyle(primary: true, fullWidth: true))
+                    .disabled(model.isBusy || model.destRoot == nil || model.selectedCount == 0)
+                }
+            }
+        }
+        .padding(12)
+        .stradaPanel()
+    }
+
+    func tabButton(_ title: String, _ tab: InspectorTab) -> some View {
+        let active = model.inspectorTab == tab
+        return Button {
+            model.inspectorTab = tab
+        } label: {
+            Text(title)
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundStyle(active ? Theme.text : Theme.text2)
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 7)
+                .background(RoundedRectangle(cornerRadius: 7).fill(active ? Theme.card2 : Color.clear))
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
+}
+
+struct StorageBar: View {
+    let capacity: Int64
+    let free: Int64
+    let toCopy: Int64
+
+    var body: some View {
+        GeometryReader { geo in
+            let w = geo.size.width
+            let cap = Double(max(capacity, 1))
+            let used = CGFloat(Double(max(0, capacity - free)) / cap)
+            let copy = CGFloat(Double(min(toCopy, free)) / cap)
+            HStack(spacing: 0) {
+                Rectangle().fill(Theme.text3).frame(width: w * used)
+                Rectangle()
+                    .fill(toCopy > free ? Theme.red : Theme.accent)
+                    .frame(width: toCopy > 0 ? max(w * copy, 4) : 0)
+                Spacer(minLength: 0)
+            }
+            .frame(width: w, height: 10)
+            .background(Theme.bar)
+            .clipShape(Capsule())
+        }
+        .frame(height: 10)
+    }
+}
+
+struct LegendDot: View {
+    let color: Color
+    let label: String
+    var body: some View {
+        HStack(spacing: 5) {
+            Circle().fill(color).frame(width: 7, height: 7)
+            Text(label).font(.system(size: 11)).foregroundStyle(Theme.text2)
         }
     }
 }
 
-struct AuditPanel: View {
+struct AuditCard: View {
     let audit: SpaceAudit
     let hasScanned: Bool
 
     var body: some View {
-        GroupBox(label: Label("Space audit", systemImage: "chart.bar.doc.horizontal")) {
+        Card {
+            Text("SPACE AUDIT")
+                .font(.system(size: 11, weight: .semibold))
+                .tracking(0.5)
+                .foregroundStyle(Theme.text2)
             if !hasScanned {
-                Text("Run “Find Media” to calculate the total size of the pull list.")
-                    .foregroundStyle(.secondary)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(6)
+                Text("Find media to calculate how much space the pull list needs.")
+                    .font(.system(size: 12))
+                    .foregroundStyle(Theme.text2)
             } else {
-                HStack(alignment: .top, spacing: 32) {
-                    AuditItem(title: "PULL LIST TOTAL", value: formatTB(audit.total),
-                              note: "\(audit.fileCount) files · \(formatBytes(audit.total))")
-                    AuditItem(title: "FILE TYPES SELECTED", value: "\(audit.byCategory.count)",
-                              note: audit.byCategory.map { $0.name.components(separatedBy: " ·").first ?? $0.name }
-                                .joined(separator: ", "))
-                    if audit.hasDest {
-                        AuditItem(title: "ALREADY ON DESTINATION", value: formatTB(audit.already),
-                                  note: "\(audit.alreadyCount) files — will be skipped")
-                        AuditItem(title: "TO TRANSFER", value: formatTB(audit.toCopy), note: formatBytes(audit.toCopy))
-                        AuditItem(title: "DESTINATION FREE", value: audit.free.map { formatTB($0) } ?? "—",
-                                  note: audit.free.map { formatBytes($0) } ?? "")
-                        if audit.fits == true, let left = audit.leftAfter {
-                            AuditItem(title: "RESULT", value: "Fits", note: "\(formatTB(left)) left after transfer",
-                                      color: .green)
-                        } else if audit.fits == false {
-                            AuditItem(title: "RESULT", value: "Won’t fit", note: "Short by \(formatTB(audit.shortfall))",
-                                      color: .red)
-                        }
-                    } else {
-                        AuditItem(title: "DESTINATION", value: "—", note: "Choose a destination to check free space")
-                    }
-                    Spacer()
+                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                    Text(formatTB(audit.toCopy))
+                        .font(.system(size: 30, weight: .bold))
+                    Text("to transfer")
+                        .font(.system(size: 14))
+                        .foregroundStyle(Theme.text2)
                 }
-                .padding(6)
+                Text("Pull list \(formatTB(audit.total)) · \(audit.fileCount) files"
+                     + (audit.alreadyCount > 0 ? " · \(audit.alreadyCount) already on destination" : ""))
+                    .font(.system(size: 12))
+                    .foregroundStyle(Theme.text2)
+
+                if audit.hasDest, let cap = audit.capacity, let free = audit.free {
+                    StorageBar(capacity: cap, free: free, toCopy: audit.toCopy)
+                        .padding(.top, 4)
+                    HStack(spacing: 12) {
+                        LegendDot(color: Theme.text3, label: "Used")
+                        LegendDot(color: Theme.accent, label: "This transfer")
+                        LegendDot(color: Theme.bar, label: "Free \(formatTB(free))")
+                    }
+                }
+
+                if !audit.hasDest {
+                    Text("Choose a destination to check free space.")
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(Theme.yellow)
+                } else if audit.fits == true, let left = audit.leftAfter {
+                    Text("Fits — \(formatTB(left)) left after transfer")
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(Theme.green)
+                } else if audit.fits == false {
+                    Text("Won’t fit — short by \(formatTB(audit.shortfall)). Deselect file types or choose a larger drive.")
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(Theme.red)
+                }
+
+                if !audit.byCategory.isEmpty {
+                    Divider().overlay(Theme.border)
+                    ForEach(audit.byCategory, id: \.name) { c in
+                        HStack {
+                            Text(c.name.components(separatedBy: " ·").first ?? c.name)
+                                .font(.system(size: 12, weight: .medium))
+                            Text("\(c.count)")
+                                .font(.system(size: 11))
+                                .foregroundStyle(Theme.text3)
+                            Spacer()
+                            Text(formatBytes(c.bytes))
+                                .font(.system(size: 12))
+                                .monospacedDigit()
+                                .foregroundStyle(Theme.text2)
+                        }
+                    }
+                }
             }
         }
     }
 }
+
+struct DestinationCard: View {
+    @EnvironmentObject var model: AppModel
+
+    var body: some View {
+        Card {
+            Text("Destination")
+                .font(.system(size: 14, weight: .semibold))
+            HStack(spacing: 10) {
+                Image(systemName: "externaldrive.fill")
+                    .font(.system(size: 15))
+                    .foregroundStyle(Theme.text2)
+                    .frame(width: 34, height: 34)
+                    .background(RoundedRectangle(cornerRadius: 8).fill(Theme.card2))
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(model.destRoot?.lastPathComponent ?? "Not selected")
+                        .font(.system(size: 13, weight: .semibold))
+                        .lineLimit(1)
+                    Text(model.destRoot?.path ?? "Choose a drive or folder")
+                        .font(.system(size: 11))
+                        .foregroundStyle(Theme.text3)
+                        .lineLimit(1).truncationMode(.middle)
+                }
+                Spacer(minLength: 4)
+                Button(model.destRoot == nil ? "Choose…" : "Change…") {
+                    if let u = Panels.pickFolder("Use as Destination", message: "Choose where the pulled media should go") {
+                        model.setDestination(u)
+                    }
+                }
+                .buttonStyle(StradaButtonStyle())
+                .disabled(model.isBusy)
+            }
+        }
+    }
+}
+
+struct SettingsCard: View {
+    @EnvironmentObject var model: AppModel
+
+    var body: some View {
+        Card {
+            Text("Transfer Settings")
+                .font(.system(size: 14, weight: .semibold))
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Organize destination")
+                    .font(.system(size: 12))
+                    .foregroundStyle(Theme.text2)
+                Picker("", selection: $model.layout) {
+                    ForEach(Layout.allCases) { l in Text(l.rawValue).tag(l) }
+                }
+                .pickerStyle(.menu)
+                .labelsHidden()
+                .frame(maxWidth: .infinity)
+            }
+            HStack {
+                Text("Verify with MD5 checksum")
+                    .font(.system(size: 13))
+                Spacer()
+                Toggle("", isOn: $model.verify)
+                    .labelsHidden()
+                    .toggleStyle(.switch)
+                    .controlSize(.small)
+            }
+        }
+        .disabled(model.isBusy)
+    }
+}
+
+struct InfoRow: View {
+    let label: String
+    let value: String
+    var body: some View {
+        VStack(alignment: .leading, spacing: 3) {
+            Text(label)
+                .font(.system(size: 11, weight: .medium))
+                .foregroundStyle(Theme.text3)
+            Text(value)
+                .font(.system(size: 12))
+                .foregroundStyle(Theme.text)
+                .textSelection(.enabled)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
+struct FileInfoCard: View {
+    @EnvironmentObject var model: AppModel
+
+    var body: some View {
+        if let i = model.selectedIndex, model.files.indices.contains(i) {
+            let f = model.files[i]
+            Card {
+                HStack(spacing: 10) {
+                    Image(systemName: iconName(for: f.type.family))
+                        .font(.system(size: 15))
+                        .foregroundStyle(Theme.text2)
+                        .frame(width: 34, height: 34)
+                        .background(RoundedRectangle(cornerRadius: 8).fill(Theme.card2))
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(f.url.lastPathComponent)
+                            .font(.system(size: 13, weight: .semibold))
+                            .lineLimit(2)
+                        Text("\(f.type.category) · \(formatBytes(f.size))")
+                            .font(.system(size: 11))
+                            .foregroundStyle(Theme.text2)
+                    }
+                }
+                Divider().overlay(Theme.border)
+                InfoRow(label: "Timeline name", value: f.matchedName + (f.partialMatch ? "  (partial match)" : ""))
+                InfoRow(label: "Detected as", value: f.type.reason)
+                InfoRow(label: "Source", value: f.url.path)
+                InfoRow(label: "Will copy to", value: destinationRelPath(f, layout: model.layout))
+                InfoRow(label: "Status", value: f.state.isEmpty
+                        ? (model.alreadyPresent.contains(i) ? "Already on destination" : (f.selected ? "Selected for transfer" : "Not selected"))
+                        : f.state)
+                HStack(spacing: 8) {
+                    Button(f.selected ? "Deselect" : "Select") { model.toggleFile(i) }
+                        .buttonStyle(StradaButtonStyle())
+                        .disabled(model.isBusy)
+                    Button("Reveal in Finder") { model.revealSelected() }
+                        .buttonStyle(StradaButtonStyle())
+                }
+                .padding(.top, 4)
+            }
+        } else {
+            Card {
+                Text("File Info")
+                    .font(.system(size: 14, weight: .semibold))
+                Text("Click a file in the pull list to see where it came from and where it will be copied.")
+                    .font(.system(size: 12))
+                    .foregroundStyle(Theme.text2)
+            }
+        }
+    }
+}
+
+// MARK: - Not found sheet
 
 struct UnmatchedView: View {
     let refs: [TimelineRef]
     @Environment(\.dismiss) private var dismiss
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text("Timeline references not found on the source drive(s)").font(.headline)
-            Text("Common reasons: titles or generated media, VFX, media on another drive, clips renamed during the edit, or audio that references a synced clip name instead of the WAV file name.")
-                .font(.caption).foregroundStyle(.secondary)
-            List(refs, id: \.self) { r in
-                VStack(alignment: .leading) {
-                    Text(r.display)
-                    Text(r.label).font(.caption).foregroundStyle(.secondary)
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Not Found")
+                .font(.system(size: 18, weight: .bold))
+            Text("Timeline references with no matching media on the source drive(s). Common reasons: titles or generated media, VFX, media on another drive, clips renamed in the edit, or audio that references a synced clip name instead of the WAV file name.")
+                .font(.system(size: 12))
+                .foregroundStyle(Theme.text2)
+                .fixedSize(horizontal: false, vertical: true)
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 2) {
+                    ForEach(Array(refs.enumerated()), id: \.offset) { item in
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(item.element.display)
+                                .font(.system(size: 13))
+                            Text(item.element.label)
+                                .font(.system(size: 11))
+                                .foregroundStyle(Theme.text3)
+                        }
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 6)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background(RoundedRectangle(cornerRadius: 6).fill(item.offset % 2 == 1 ? Theme.rowAlt : Color.clear))
+                    }
                 }
             }
+            .background(RoundedRectangle(cornerRadius: 10).fill(Theme.panel))
+            .overlay(RoundedRectangle(cornerRadius: 10).stroke(Theme.border, lineWidth: 1))
             HStack {
                 Button("Copy List") {
                     let text = refs.map { "\($0.label)\t\($0.display)" }.joined(separator: "\n")
                     NSPasteboard.general.clearContents()
                     NSPasteboard.general.setString(text, forType: .string)
                 }
+                .buttonStyle(StradaButtonStyle())
                 Spacer()
-                Button("Done") { dismiss() }.keyboardShortcut(.defaultAction)
+                Button("Done") { dismiss() }
+                    .buttonStyle(StradaButtonStyle(primary: true))
+                    .keyboardShortcut(.defaultAction)
             }
         }
-        .padding()
-        .frame(width: 660, height: 520)
+        .padding(20)
+        .frame(width: 680, height: 540)
+        .background(Theme.bg)
+        .foregroundStyle(Theme.text)
+        .preferredColorScheme(.dark)
     }
 }
 
